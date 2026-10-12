@@ -1,0 +1,91 @@
+name: devin-assure audit gate
+description: >-
+  Verify AI coding agent claims (diffs, test runs, commits, pushes)
+  against the agent's own tool_call_state with devin-qa-pack. Gate CI on
+  evidence, not narrative: the job fails when any audited session's
+  verdict is not PASS. Read-only: audits recorded state, never modifies
+  it. Part of the devin-* ecosystem.
+author: Icaro0310
+branding:
+  icon: check-circle
+  color: purple
+inputs:
+  sessions-db:
+    description: "Path to the agent sessions.db (default: the tool's platform auto-detect)"
+    required: false
+    default: ""
+  session:
+    description: "Audit a single session ID (exact or unique prefix) instead of --all"
+    required: false
+    default: ""
+  limit:
+    description: "Max sessions to audit when using --all (most recent first)"
+    required: false
+    default: "20"
+  version:
+    description: "pip specifier for the devin-qa-pack package"
+    required: false
+    default: "devin-qa-pack>=0.1,<0.2"
+outputs:
+  verdict:
+    description: "Aggregate audit verdict — PASS when every audited session verified, PARTIAL when any claim was disputed, UNVERIFIED when nothing could be checked"
+    value: ${{ steps.audit.outputs.verdict }}
+  sessions:
+    description: Number of sessions audited
+    value: ${{ steps.audit.outputs.sessions }}
+  disputed:
+    description: Total claims whose evidence contradicts the claim
+    value: ${{ steps.audit.outputs.disputed }}
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      with:
+        python-version: "3.12"
+    - name: Install devin-qa-pack
+      shell: bash
+      run: pip install "${{ inputs.version }}"
+    - name: Audit sessions
+      id: audit
+      shell: bash
+      env:
+        SESSIONS_DB: ${{ inputs.sessions-db }}
+        SESSION_ID: ${{ inputs.session }}
+        LIMIT: ${{ inputs.limit }}
+      run: |
+        args=(audit --json)
+        if [ -n "$SESSION_ID" ]; then
+          args+=(--session "$SESSION_ID")
+        else
+          args+=(--all --limit "$LIMIT")
+        fi
+        [ -n "$SESSIONS_DB" ] && args+=(--sessions-db "$SESSIONS_DB")
+        set +e
+        devin-qa-pack "${args[@]}" > .qa-audit.json
+        rc=$?
+        set -e
+        if [ "$rc" -eq 2 ] || [ ! -s .qa-audit.json ]; then
+          echo "::error::devin-qa-pack could not audit (exit $rc) — sessions.db missing/unreadable or zero sessions in scope. A violated precondition, not a claim dispute."
+          echo "verdict=UNVERIFIED" >> "$GITHUB_OUTPUT"
+          echo "sessions=0" >> "$GITHUB_OUTPUT"
+          echo "disputed=0" >> "$GITHUB_OUTPUT"
+          exit 2
+        fi
+        python3 - <<'PY'
+        import json, os
+        d = json.load(open(".qa-audit.json"))
+        sessions = d["sessions"]
+        order = {"PASS": 0, "UNVERIFIED": 1, "PARTIAL": 2}
+        worst = max((s["verdict"] for s in sessions), key=order.get, default="UNVERIFIED")
+        disputed = sum(s["summary"].get("disputed", 0) for s in sessions)
+        out = open(os.environ["GITHUB_OUTPUT"], "a")
+        out.write(f"verdict={worst}\nsessions={len(sessions)}\ndisputed={disputed}\n")
+        for s in sessions:
+            if s["verdict"] != "PASS":
+                print(f"::error::session {s['session_id']}: {s['verdict']} — {s['summary']}")
+        print(f"::notice::devin-qa-pack: {len(sessions)} session(s) audited, verdict={worst}, disputed={disputed}")
+        PY
+        if [ "$rc" -ne 0 ]; then
+          echo "::error::devin-qa-pack audit: at least one session is not PASS — claims were made that the recorded tool_call_state does not back"
+          exit 1
+        fi
