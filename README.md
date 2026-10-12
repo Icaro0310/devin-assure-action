@@ -57,6 +57,13 @@ Audit one session, or a database at a non-default location:
 | `PARTIAL` | any disputed claim, or a mix of outcomes | yes |
 | `UNVERIFIED` | no claims found, or none checkable | yes |
 
+## Platform support
+
+Runs on any runner with bash; Python 3.12 comes from
+`actions/setup-python`. The audit needs a `sessions.db` — typically a
+self-hosted runner with a Devin install, or a db artifact passed via
+`sessions-db`.
+
 ## Notes
 
 - Read-only by design — the audit inspects recorded state and never
